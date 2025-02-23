@@ -1,32 +1,19 @@
-import { useEffect, useState } from "react";
+import { trpc } from "./trpc";
 
-type Book = {
-  id: string;
-  title: string;
-};
+const App = () => {
+  const { data, isLoading } = trpc.user.getUsers.useQuery();
 
-function App() {
-  const [books, setBooks] = useState<Book[]>([]);
-
-  useEffect(() => {
-    const getBooks = async () => {
-      const response = await fetch("http://localhost:4000/books");
-      console.log(response);
-      const data = await response.json();
-      setBooks(data);
-    };
-    getBooks();
-  }, []);
+  if (isLoading) return <div>Loading ...</div>;
 
   return (
-    <>
+    <div>
       <ul>
-        {books.map((book) => (
-          <li key={book.id}>{book.title}</li>
+        {(data ?? []).map((user) => (
+          <li key={user.id}>{user.name}</li>
         ))}
       </ul>
-    </>
+    </div>
   );
-}
+};
 
 export default App;

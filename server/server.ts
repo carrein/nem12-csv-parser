@@ -1,7 +1,22 @@
-import app from "./app";
+import * as trpcExpress from "@trpc/server/adapters/express";
+import cors from "cors";
+import express from "express";
 
-const port = 4000;
+import { createContext } from "./src/context";
+import { appRouter } from "./src/router";
 
-app.listen(port, () => {
-  console.log(`App listening at http://localhost:${port}`);
-});
+const app = express();
+
+app.use(cors());
+
+app.use(
+  "/trpc",
+  trpcExpress.createExpressMiddleware({
+    router: appRouter,
+    createContext,
+  })
+);
+
+app.listen(4000);
+
+export type AppRouter = typeof appRouter;
