@@ -1,6 +1,6 @@
 import { initORM } from "../src/db.js";
 import config from "../src/mikro-orm.config.js";
-import { TestSeeder } from "./seeders/TestSeeder.js";
+import { MeterReadingSeeder } from "./seeders/MeterReadingSeeder.js";
 import { bootstrap } from "./server.js";
 
 export async function initTestApp(port: number) {
@@ -19,7 +19,7 @@ export async function initTestApp(port: number) {
 
   // create the schema so we can use the database
   await orm.schema.createSchema();
-  await orm.seeder.seed(TestSeeder);
+  await orm.seeder.seed(MeterReadingSeeder);
 
   const app = await bootstrap(port, false);
 

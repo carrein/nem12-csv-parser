@@ -1,2 +1,5 @@
 node_modules
-sample
+sample/NEM12 - 100000 Rows.csv
+sample/NEM12 - 200000 Rows.csv
+sqlite.db
+temp

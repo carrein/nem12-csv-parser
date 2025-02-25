@@ -1,41 +1,53 @@
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import Papa, { ParseStepResult } from "papaparse";
 import { useState } from "react";
 import { Button } from "./components/Button";
 import { Column } from "./components/Column";
 import { Error } from "./components/Error";
-import { Fieldset } from "./components/Fieldset";
 import { Label } from "./components/Label";
 import { Layout } from "./components/Layout";
-import { Input } from "./components/Radio";
-import { isValidCSVType, parseCSV } from "./helpers/csv";
+import { Rows } from "./components/Rows";
+import { WarningButton } from "./components/WarningButton";
 import {
-  areMeterReadingsValid,
-  extractMeterReadings,
+  areMeterReadingsNonEmpty,
+  areMeterReadingsUnique,
   isValidNem12Type,
 } from "./helpers/nem12";
 import { createInsertStatement } from "./helpers/sql";
-import { uploadNEM12File } from "./services/nem12.service";
-
-type ProcessingOptions = "client" | "server";
+import { trpc } from "./trpc";
+import {
+  MeterReading,
+  MINUTES_IN_A_DAY,
+  NEM12_INTERVAL_METER_READING_DATA,
+  NEM12_NMI_DETAILS,
+  NEM12_START_OF_DATA,
+} from "./types/types";
 
 // Entrypoint for NEM12 CSV Parser.
 // This application is lightly styled to retains HTML semantics and keep things light.
 // ##IMPROVEMENT: Consider swapping to a form library if fields increase in complexity.
 export const Home = () => {
-  const [processingOption, setProcessingOption] =
-    useState<ProcessingOptions>("client");
   const [file, setFile] = useState<File | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
   const [copySuccessMessage, setCopySuccessMessage] = useState(false);
   const [sqlStatement, setSqlStatement] = useState("");
   const [meterReadingsCount, setMeterReadingsCount] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
-  const mutation = useMutation({
-    mutationFn: uploadNEM12File,
-    onSuccess: (data) => {
-      setSqlStatement(data.message);
-    },
-  });
+  // Only show INSERT SQL statement button if server is online.
+  const { status } = useQuery(
+    trpc.healthCheckRouter.healthCheck.queryOptions()
+  );
+  const mutation = useMutation(
+    trpc.meterReadingRouter.insertSQLMeterReadingStatement.mutationOptions({
+      onSuccess: (data) => {
+        setFile(null);
+        setErrorMessage(`Successfully inserted ${data.changes} changes.`);
+      },
+      onError: (error) => {
+        setErrorMessage(error.message);
+      },
+    })
+  );
 
   const reset = () => {
     setSqlStatement("");
@@ -43,67 +55,6 @@ export const Home = () => {
     setCopySuccessMessage(false);
     setIsLoading(false);
     setMeterReadingsCount(0);
-  };
-
-  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
-    reset();
-
-    // Prevent default default behavior of form from refreshing the page.
-    event.preventDefault();
-
-    setFile(file);
-
-    if (!file) return;
-
-    if (!isValidCSVType(file)) {
-      setErrorMessage("Please upload a valid CSV file.");
-      return;
-    }
-
-    if (processingOption === "server") {
-      // mutation.mutate(file);
-      // setSqlStatement(mutation.data.message);
-      // setErrorMessage("");
-      return;
-    }
-
-    setIsLoading(true);
-
-    const parsedFile = await parseCSV(file);
-
-    if (!isValidNem12Type(parsedFile)) {
-      setErrorMessage("Invalid NEM12 file. Please check the file format.");
-      setIsLoading(false);
-      return;
-    }
-
-    const meterReadings = extractMeterReadings(parsedFile);
-
-    if (meterReadings.length === 0) {
-      setErrorMessage("No valid meter readings found in the file.");
-      setIsLoading(false);
-      return;
-    }
-
-    if (!areMeterReadingsValid(meterReadings)) {
-      setErrorMessage("Invalid meter readings found in the file.");
-      setIsLoading(false);
-      return;
-    }
-
-    setErrorMessage("");
-    setIsLoading(false);
-    setSqlStatement(createInsertStatement(meterReadings));
-    setMeterReadingsCount(meterReadings.length);
-  };
-
-  const handleCopy = () => {
-    navigator.clipboard
-      .writeText(sqlStatement)
-      .then(() => setCopySuccessMessage(true))
-      .catch((err) => {
-        console.error("Failed to copy: ", err);
-      });
   };
 
   const handleFileChange = async (
@@ -115,17 +66,131 @@ export const Home = () => {
 
     reset();
     setFile(file);
+
+    // Prevent default default behavior of form from refreshing the page.
+    event.preventDefault();
+
+    setFile(file);
+
+    if (!file) return;
+
+    if (file.type !== "text/csv") {
+      setErrorMessage("Please upload a valid CSV file.");
+      return;
+    }
+
+    setIsLoading(true);
+
+    let nmi = "";
+    let intervalLength = "";
+    const meterReadings: MeterReading[] = [];
+
+    // Stream each individual row instead of loading entire file in browser memory.
+    Papa.parse(file, {
+      step: (row: ParseStepResult<string[]>) => {
+        const currentRow = row.data as string[];
+
+        // Inspect row 100 of the file to verify NEM12 compatability.
+        if (currentRow[0] === NEM12_START_OF_DATA) {
+          if (!isValidNem12Type(currentRow)) {
+            setErrorMessage(
+              "Invalid NEM12 file. Please check the file format."
+            );
+            setIsLoading(false);
+            return;
+          }
+        }
+
+        // Inspect row 200 to grab the NMI and interval length details.
+        // Every subsequent row 300 entry will be associated with this NMI.
+        if (currentRow[0] === NEM12_NMI_DETAILS) {
+          nmi = currentRow[1];
+          intervalLength = currentRow[8];
+        }
+
+        // Inspect row 300 to grab reading data.
+        if (currentRow[0] === NEM12_INTERVAL_METER_READING_DATA) {
+          const interval = parseInt(intervalLength, 10);
+          // The number of values provided must equal 1440 (1 day) divided by
+          // the IntervalLength. This is a repeating field with individual
+          // field values separated by comma delimiters.
+          const readingsCount = MINUTES_IN_A_DAY / interval;
+
+          // Accumulate consumption reading figure across the row.
+          const consumptionValues = currentRow.slice(2, 2 + readingsCount);
+          const consumption = consumptionValues.reduce((acc, val) => {
+            return acc + parseFloat(val);
+          }, 0);
+
+          meterReadings.push({
+            nmi,
+            timestamp: currentRow[1],
+            consumption: consumption.toString(),
+          });
+        }
+      },
+      complete: () => {
+        // No valid readings are found i.e. missing 200 or 300 rows.
+        if (meterReadings.length === 0) {
+          setErrorMessage("No valid meter readings found in the file.");
+          setIsLoading(false);
+          return;
+        }
+
+        // Readings with non-unique NMI and timestamp combination exists
+        // OR readings with missing NMI, timestamp or consumption value exists.
+        if (!areMeterReadingsNonEmpty(meterReadings)) {
+          setErrorMessage("Meter readings contain empty NMI or reading field.");
+          setIsLoading(false);
+          return;
+        }
+
+        // OR readings with missing NMI, timestamp or consumption value exists.
+        if (!areMeterReadingsUnique(meterReadings)) {
+          setErrorMessage(
+            "Meter readings violate unique NMI with timestamp constraints."
+          );
+          setIsLoading(false);
+          return;
+        }
+
+        setErrorMessage("");
+        setIsLoading(false);
+        setSqlStatement(createInsertStatement(meterReadings));
+        setMeterReadingsCount(meterReadings.length);
+        return;
+      },
+      error: (error) => {
+        console.error("Error parsing CSV:", error);
+      },
+    });
   };
 
-  const handleProcessingOptionChange = (
-    event: React.ChangeEvent<HTMLInputElement>
-  ) => setProcessingOption(event.target.value as ProcessingOptions);
+  const handleCopy = () => {
+    navigator.clipboard
+      .writeText(sqlStatement)
+      .then(() => setCopySuccessMessage(true))
+      .catch((err) => {
+        console.error("Failed to copy: ", err);
+      });
+  };
+
+  // const handleFileChange = async (
+  //   event: React.ChangeEvent<HTMLInputElement>
+  // ) => {
+  //   const file = event.target.files?.[0];
+
+  //   if (!file) return;
+
+  //   reset();
+  //   setFile(file);
+  // };
 
   return (
     <Layout>
       <h1>NEM12 CSV Parser</h1>
       <div>
-        <h3>Generate SQL INSERT statements from a NEM12 compatible CSV file</h3>
+        <h2>Generate SQL INSERT statements from a NEM12 compatible CSV file</h2>
         <span>1. Only 200 and 300 NEM12 record indicators are parsed.</span>
         <br />
         <span>
@@ -134,66 +199,46 @@ export const Home = () => {
         </span>
       </div>
       <Column>
-        <h2>Upload NEM12 compatible CSV file</h2>
-        <form onSubmit={handleSubmit} encType="multipart/form-data">
-          <Column>
-            <legend>1. Select CSV file</legend>
-            <Fieldset>
-              <input
-                disabled={mutation.isPending || isLoading}
-                type="file"
-                accept=".csv"
-                onChange={handleFileChange}
-              />
-            </Fieldset>
-            <legend>2. Select preferred processing type</legend>
-            <Fieldset>
-              <Label>
-                <Input
-                  disabled={mutation.isPending || isLoading}
-                  type="radio"
-                  name="option"
-                  value="client"
-                  checked={processingOption === "client"} // Control the radio button
-                  onChange={handleProcessingOptionChange} // Handle change
-                  required
-                />
-                Client
-              </Label>
-              <Label>
-                <Input
-                  disabled={mutation.isPending || isLoading}
-                  type="radio"
-                  name="option"
-                  value="server"
-                  checked={processingOption === "server"} // Control the radio button
-                  onChange={handleProcessingOptionChange} // Handle change
-                />
-                Server
-              </Label>
-            </Fieldset>
-            <Button
-              type="submit"
-              disabled={mutation.isPending || !file || isLoading}
-            >
-              {mutation.isPending || isLoading ? "Uploading..." : "Upload File"}
-            </Button>
-            <Label>{errorMessage && <Error>{errorMessage}</Error>}</Label>
-          </Column>
-        </form>
+        <h2>1. Upload NEM12 compatible CSV file</h2>
+        <Column>
+          <input
+            disabled={mutation.isPending || isLoading}
+            type="file"
+            accept=".csv"
+            onChange={handleFileChange}
+          />
+        </Column>
       </Column>
       <Column>
         {sqlStatement && (
           <Column>
-            <h2>Generated INSERT statement</h2>
+            <h2>2. Get an INSERT statement</h2>
             <textarea rows={10} value={sqlStatement} readOnly />
             <Label>{`Number of rows: ${meterReadingsCount}`}</Label>
-            <Button onClick={handleCopy}>Copy</Button>
+            <Rows>
+              <Button onClick={handleCopy}>Copy</Button>
+              {status === "success" && (
+                <WarningButton
+                  disabled={mutation.isPending || !file || isLoading}
+                  onClick={() => {
+                    var userConfirmed = confirm(
+                      "Alert! This will attempt to run the generated SQL statement against the database."
+                    );
+                    if (userConfirmed) {
+                      mutation.mutate(sqlStatement);
+                    }
+                  }}
+                >
+                  Execute INSERT statement
+                </WarningButton>
+              )}
+            </Rows>
             {copySuccessMessage && (
               <span>INSERT statement copied to clipboard.</span>
             )}
           </Column>
         )}
+        <Label>{errorMessage && <Error>{errorMessage}</Error>}</Label>
       </Column>
     </Layout>
   );
