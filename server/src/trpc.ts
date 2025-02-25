@@ -1,15 +1,13 @@
-import { inferAsyncReturnType, initTRPC } from "@trpc/server";
+import { EntityManager, MikroORM } from "@mikro-orm/core";
+import { initTRPC } from "@trpc/server";
 
-import { createContext } from "./context";
+export const createContext = (em: EntityManager) => ({
+  em: em.fork(),
+});
 
-export type Context = inferAsyncReturnType<typeof createContext>;
+export type Context = Awaited<ReturnType<typeof createContext>>;
 
 const t = initTRPC.context<Context>().create();
 
-export const middleware = t.middleware;
 export const router = t.router;
-
-/**
- * Public procedures
- **/
 export const publicProcedure = t.procedure;
