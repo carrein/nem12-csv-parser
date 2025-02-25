@@ -4,10 +4,11 @@ import { MeterReading } from "../types/types";
 export const createInsertStatement = (
   meterReadings: MeterReading[]
 ): string => {
-  const formattedReadings = meterReadings.map(
-    (item) =>
-      `('${item.nmi}', TO_TIMESTAMP('${item.timestamp}'::text, 'YYYYMMDD'), ${item.consumption})`
-  );
-  const values = formattedReadings.join(", ");
-  return `INSERT INTO meter_readings (nmi, timestamp, consumption) VALUES ${values};`;
+  const formattedReadings = meterReadings
+    .map((item) => {
+      const formattedTimestamp = item.timestamp;
+      return `('${item.nmi}', '${formattedTimestamp}', ${item.consumption})`;
+    })
+    .join(", ");
+  return `INSERT INTO meter_readings (nmi, timestamp, consumption) VALUES ${formattedReadings};`;
 };
